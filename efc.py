@@ -1,5 +1,6 @@
-import random
 import os
+import random
+import time
 
 # ==========================================
 # 콘솔 UI 및 화면 제어 함수
@@ -9,7 +10,7 @@ def wait():
     input("▶ 엔터")
 
 def clear_screen():
-    """콘솔 화면을 깔끔하게 지워주는 함수 (OS 대응)"""
+    """콘솔 화면을 지우고 커서를 화면 맨 위로 이동하는 함수"""
     os.system('cls' if os.name == 'nt' else 'clear')
 
 def show_step(text):
@@ -17,6 +18,75 @@ def show_step(text):
     clear_screen()
     print(text)
     wait()
+
+
+def show_effect_sequence(lines, delay=1.0):
+    """효과 진행 과정을 같은 줄에서 순차적으로 교체해 보여준다."""
+    for idx, line in enumerate(lines):
+        print("\r\033[K" + line, end="", flush=True)
+        if idx < len(lines) - 1:
+            time.sleep(delay)
+    print()
+
+
+def has_attack_position_monsters():
+    """필드에 공격 표시 몬스터가 있는지 확인"""
+    return any(zone["card"] and zone["pos"] == "atk" for zone in monster_field)
+
+
+def resolve_earthquake_effect():
+    """어스퀘이크의 발동 조건과 효과를 처리한다."""
+    if not has_attack_position_monsters():
+        print("발동 불가: 공격 표시 몬스터가 없습니다.")
+        wait()
+        return False
+
+    show_effect_sequence([
+        "▶ 발동: 어스퀘이크를 발동합니다.",
+        "▶ 효과 처리: 공격 표시 몬스터를 앞면 수비 표시로 전환합니다.",
+        "▶ 묘지: 어스퀘이크를 묘지로 보냅니다."
+    ], delay=1.0)
+
+    for zone in monster_field:
+        if zone["card"] and zone["pos"] == "atk":
+            zone["pos"] = "def"
+
+    return True
+
+
+def reverse_summon_monster(zone_idx):
+    """뒷면 수비 표시로 세트된 몬스터를 반전소환한다."""
+    if not valid_field(zone_idx):
+        print(">> [에러] 몬스터 존 번호가 올바르지 않습니다."); wait(); return False
+
+    zone = monster_field[zone_idx]
+    if zone["card"] is None:
+        print(">> [에러] 해당 몬스터 존이 비어 있습니다."); wait(); return False
+
+    m_id = zone["card"] // 100
+    if tribes[m_id] in ["마법", "함정"]:
+        print(">> [에러] 마법/함정은 반전소환할 수 없습니다."); wait(); return False
+
+    if zone["pos"] != "set":
+        print(">> [에러] 뒷면 수비 표시로 세트된 몬스터만 반전소환할 수 있습니다."); wait(); return False
+
+    if zone.get("set_turn") == turn:
+        print(">> [에러] 세트된 턴에는 반전소환할 수 없습니다."); wait(); return False
+
+    zone["pos"] = "atk"
+    show_step(f">> [반전소환] {names[m_id]}를 앞면 공격 표시로 반전소환했습니다.")
+    return True
+
+
+def process_reverse_summon_numeric(cmd):
+    """숫자 명령으로 반전소환을 처리한다.
+    예: 23 -> 3번 몬스터 존의 몬스터를 반전소환
+    """
+    if not cmd.isdigit() or len(cmd) < 2 or cmd[0] != "2":
+        return False
+
+    zone_idx = int(cmd[1:]) - 1
+    return reverse_summon_monster(zone_idx)
 
 # ==========================================
 # 카드 데이터베이스 및 텍스트 매핑
@@ -231,6 +301,29 @@ def send_monster_to_grave(m_idx):
             grave.append(st_uid)
             print(f">> [연쇄 파괴] 장착 대상 소멸로 인해 {names[st_uid // 100]}가 묘지로 보내졌습니다.")
 
+def activate_noninstant_magic(uid, hand_idx=None):
+    """일반 마법 중 지속마법은 필드에 유지되도록 처리한다."""
+    m_id = uid // 100
+    if m_id in [10, 11]:
+        empty_idx = -1
+        for i in range(5):
+            if st_field[i]["card"] is None:
+                empty_idx = i; break
+        if empty_idx == -1:
+            print("마함존 공간 부족"); wait(); return False
+        if hand_idx is not None:
+            hand.pop(hand_idx)
+        st_field[empty_idx] = {"card": uid, "pos": "faceup", "set_turn": turn, "counter": 0, "parent_zone": None}
+        show_step(f">> 지속 마법 [{names[m_id]}]을 S{empty_idx+1}에 배치했습니다.")
+        return True
+
+    if hand_idx is not None:
+        hand.pop(hand_idx)
+    grave.append(uid)
+    show_step(f">> 마법 카드 [{names[m_id]}] 발동 및 효과 처리 후 묘지 이송.")
+    return True
+
+
 def play_magic_trap(hand_idx):
     """패에서 직접 수동으로 마법/함정을 활성화하거나 세트하는 구식 제어 기기"""
     if not valid_hand(hand_idx): return
@@ -252,13 +345,83 @@ def play_magic_trap(hand_idx):
     if choice == "1":
         if card_type != "마법":
             print("함정은 패에서 직접 발동할 수 없습니다."); wait(); return
-        hand.pop(hand_idx)
-        grave.append(uid)
-        show_step(f">> 마법 카드 [{names[m_id]}] 발동 및 효과 처리 후 묘지 이송.")
+        if m_id == 6:
+            if not resolve_earthquake_effect():
+                return
+            hand.pop(hand_idx)
+            grave.append(uid)
+            return
+        activate_noninstant_magic(uid, hand_idx)
     elif choice == "2":
         hand.pop(hand_idx)
         st_field[empty_idx] = {"card": uid, "pos": "set", "set_turn": turn, "counter": 0, "parent_zone": None}
         show_step(f">> 마함존 {empty_idx+1}번에 세트 완료.")
+
+
+def process_magic_trap_numeric(cmd):
+    """숫자 기반 마법/함정 명령을 처리한다.
+    지원 형식:
+    - 0 + 0/1 + 번호 + 번호: 패에서 발동/세트 (예: 0101)
+    - 0 + 번호 + 번호: 패에서 발동, 번호를 카드/존으로 해석 (예: 0301)
+    - 1 + 번호: 필드의 세트된 마함존 발동 (예: 103)
+    """
+    if not cmd.isdigit() or len(cmd) < 3:
+        return False
+
+    source_type = int(cmd[0])
+
+    if len(cmd) >= 2 and cmd[1] in {"0", "1"}:
+        action_type = int(cmd[1])
+        subject_idx = int(cmd[2]) - 1 if len(cmd) > 2 else -1
+        target_zone = int(cmd[3]) - 1 if len(cmd) > 3 else -1
+    else:
+        action_type = 0
+        subject_idx = int(cmd[1]) - 1 if len(cmd) > 1 else -1
+        target_zone = int(cmd[2]) - 1 if len(cmd) > 2 else -1
+
+    if source_type == 0:
+        if action_type == 0:
+            if not valid_hand(subject_idx):
+                print(">> [에러] 패 인덱스가 올바르지 않습니다."); wait(); return True
+            uid = hand[subject_idx]
+            m_id = uid // 100
+            if tribes[m_id] not in ["마법", "함정"]:
+                print(">> [에러] 패의 선택 카드가 마법/함정이 아닙니다."); wait(); return True
+            if tribes[m_id] != "마법":
+                print(">> [에러] 패에서 함정은 발동할 수 없습니다."); wait(); return True
+            if m_id == 6:
+                if not resolve_earthquake_effect():
+                    return True
+                hand.pop(subject_idx)
+                grave.append(uid)
+                return True
+            activate_noninstant_magic(uid, subject_idx)
+            return True
+
+        if action_type == 1:
+            if not valid_hand(subject_idx):
+                print(">> [에러] 패 인덱스가 올바르지 않습니다."); wait(); return True
+            uid = hand[subject_idx]
+            m_id = uid // 100
+            if tribes[m_id] not in ["마법", "함정"]:
+                print(">> [에러] 패의 선택 카드가 마법/함정이 아닙니다."); wait(); return True
+            if not valid_field(target_zone):
+                print(">> [에러] 세트할 마함존 번호가 올바르지 않습니다."); wait(); return True
+            if st_field[target_zone]["card"] is not None:
+                print(">> [에러] 지정한 마함존이 이미 차 있습니다."); wait(); return True
+            hand.pop(subject_idx)
+            st_field[target_zone] = {"card": uid, "pos": "set", "set_turn": turn, "counter": 0, "parent_zone": None}
+            show_step(f">> [숫자세트] 패의 {names[m_id]}를 S{target_zone+1}에 세트했습니다.")
+            return True
+
+    elif source_type == 1:
+        if not valid_field(subject_idx):
+            print(">> [에러] 필드 마함존 번호가 올바르지 않습니다."); wait(); return True
+        trigger_set_st(subject_idx)
+        return True
+
+    print(">> [에러] 지원하지 않는 마함 숫자 명령입니다."); wait(); return True
+
 
 def trigger_set_st(st_idx):
     """마함 존에 뒷면 세트된 마법/함정을 오픈하여 격발시키는 처리기"""
@@ -278,53 +441,70 @@ def trigger_set_st(st_idx):
     uid = zone["card"]
     
     # 1회성 일반 마법(6=어스퀘이크, 12=원위치) 혹은 함정은 발동 후 바로 묘지행
-    if m_id in [6, 12] or card_type == "함정": 
+    if m_id == 6:
+        if not resolve_earthquake_effect():
+            return
         st_field[st_idx] = {"card": None, "pos": None, "set_turn": None, "counter": 0, "parent_zone": None}
         grave.append(uid)
-        show_step(f">> [{names[m_id]}] 발동 성공! 효과 처리 후 묘지로 보내집니다.")
+        return
+    if m_id in [10, 11]:
+        zone["pos"] = "faceup"
+        show_step(f">> 지속 마법 [{names[m_id]}] 발동 성공. 필드에 유지됩니다.")
+        return
+    if m_id in [12] or card_type == "함정": 
+        st_field[st_idx] = {"card": None, "pos": None, "set_turn": None, "counter": 0, "parent_zone": None}
+        grave.append(uid)
+        show_step(f">> [{names[m_id]}] 발동 성공. 효과 처리 후 묘지로 보내집니다.")
     else:
         # 그 외 지속/장착마법은 필드에 유지
         show_step(f">> 세트 지속/장착 마법 [{names[m_id]}] 필드 활성화.")
 
-def equip_cocoon(hand_idx):
-    """패의 진화의 고치를 필드의 꼬마모스에게 연동 장착하는 구식 기구"""
+def equip_cocoon(hand_idx, target_zone):
+    """패의 진화의 고치를 지정한 몬스터 존의 꼬마모스에게 장착한다."""
     if not valid_hand(hand_idx) or (hand[hand_idx] // 100 != 2):
-        print("진화의 고치가 아닙니다."); wait(); return
-        
-    targets = []
-    for i, zone in enumerate(monster_field):
-        if zone["card"] and (zone["card"] // 100 == 1) and (zone["pos"] != "set"):
-            targets.append(i)
-            
-    if not targets:
-        print("필드에 앞면 표시 '꼬마모스'가 없습니다."); wait(); return
-        
-    print("\n=== 장착 대상 선택 ===")
-    for t in targets:
-        print(f"[{t+1}] {t+1}번 몬스터 존의 꼬마모스")
-    
-    sel = input("선택 → ").strip()
-    if not sel.isdigit() or (int(sel)-1) not in targets:
-        print("대상 오류"); wait(); return
-        
-    m_target = int(sel) - 1
-    
+        print("진화의 고치가 아닙니다."); wait(); return False
+
+    if not valid_field(target_zone):
+        print("대상 몬스터 존 번호가 올바르지 않습니다."); wait(); return False
+
+    zone = monster_field[target_zone]
+    if zone["card"] is None or (zone["card"] // 100 != 1) or zone["pos"] == "set" or zone["pos"] != "atk":
+        print("장착 대상이 올바르지 않습니다."); wait(); return False
+
     st_idx = -1
     for i in range(5):
         if st_field[i]["card"] is None:
             st_idx = i; break
     if st_idx == -1:
-        print("마함존 공간 부족"); wait(); return
-        
+        print("마함존 공간 부족"); wait(); return False
+
     uid = hand.pop(hand_idx)
     st_field[st_idx] = {
         "card": uid,
         "pos": "faceup",
         "set_turn": turn,
         "counter": 0,
-        "parent_zone": m_target
+        "parent_zone": target_zone
     }
-    show_step(f">> 꼬마모스(M{m_target+1})에게 진화의 고치를 장착했습니다. (M{m_target+1}.0t)")
+    show_step(f">> 꼬마모스(M{target_zone+1})에게 진화의 고치를 장착했습니다. (M{target_zone+1}.0t)")
+    return True
+
+
+def process_cocoon_equip_numeric(cmd):
+    """숫자 명령으로 진화의 고치 장착을 처리한다.
+    예: 31 -> 패의 1번째 카드(진화의 고치)를 몬스터 존 3번에 장착
+    """
+    if not cmd.isdigit() or len(cmd) < 2 or cmd[0] != "3":
+        return False
+
+    hand_idx = int(cmd[1]) - 1
+    target_zone = int(cmd[2]) - 1 if len(cmd) > 2 else -1
+    if not valid_hand(hand_idx):
+        print(">> [에러] 패 인덱스가 올바르지 않습니다."); wait(); return True
+    if not valid_field(target_zone):
+        print(">> [에러] 대상 몬스터 존 번호가 올바르지 않습니다."); wait(); return True
+
+    return equip_cocoon(hand_idx, target_zone)
 
 def check_moth_special_summon(hand_idx):
     """패에 있는 그레이트 모스류 룰 특수 소환 조건(턴 수 경과)이 맞는지 검사하여 진화 실행"""
@@ -373,7 +553,7 @@ def check_moth_special_summon(hand_idx):
     wait()
 
 # ==========================================
-# 🆕 통합 단축코드 분석기 (7자리 vs 8자리)
+# 통합 단축코드 분석기 (7자리 vs 8자리)
 # ==========================================
 def process_shortcut_unified(cmd):
     """
@@ -386,11 +566,11 @@ def process_shortcut_unified(cmd):
     # ------------------------------------------
     if len(cmd) >= 8:
         sub_cmd = cmd[:7] # 앞 7자리 파싱 진행
-        from_zone = int(sub_cmd[0])       # 1번째: 발동 위치 (0=패, 1=필드, 2=묘지, 3=제외)
+        from_zone = int(sub_cmd[0])       # 1번째: 발동  위치 (0=패, 1=필드, 2=묘지, 3=제외)
         st_val = int(sub_cmd[1])          # 2번째: 지정 마함존 (1~5)
         sub_val = int(sub_cmd[2])         # 3번째: 일의 자리 (기본 0)
         effect_no = int(sub_cmd[3])       # 4번째: 효과 번호
-        target_zone = int(sub_cmd[4])     # 5번째: 대상 카드 위치 (1=필드)
+        target_zone = int(sub_cmd[4])     # 5번째: 대상 카드 위치 
         target_action = int(sub_cmd[5])   # 6번째: 대상 카드 행선지 (0=이동 없이 필드 유지)
         is_equip = int(sub_cmd[6])        # 7번째: 장착/지속 판별 (1=필드 유지, 0=묘지 전송)
 
@@ -458,7 +638,7 @@ def process_shortcut_unified(cmd):
         from_where = int(cmd[2])      # 3번째: 3 = 패에서 출발
         hand_idx = int(cmd[3]) - 1    # 4번째: 패의 카드 인덱스
         field_idx = int(cmd[4]) - 1   # 5번째: 놓을 필드 인덱스
-        reconfirm = int(cmd[5])       # 6번째: 패 번호 재검증
+        reconfirm = int(cmd[5])       # 6번째: 5번 번호 재검증
         pos_type = int(cmd[6])        # 7번째: 표시형식 (1=앞면 공격, 2=뒷면 수비 세트)
 
         # 인덱스 유효 범위 및 무결성 체크
@@ -543,11 +723,13 @@ def main_phase1():
         print("- m숫자 : 패의 마법/함정 제어 (예: m3)")
         
         if has_cocoon:
-            print("- g숫자 : [장착 가능] 패의 진화의 고치를 꼬마모스에 장착")
+            print("- 3숫자숫자 : 패의 진화의 고치를 몬스터 존 번호로 장착 (예: 312)")
         if has_boss:
             print("- s숫자 : [특소 가능] 패의 모스류 룰 특수 소환 체크")
             
         print("- o숫자 : 마함존에 세트된 마법/함정 발동")
+        print("- 숫자 명령 : 마법/함정 발동·세트 통합 명령 (예: 0301, 0112, 103)")
+        print("- 2숫자 : 뒷면 세트된 몬스터 반전소환 (예: 23)")
         print("- d(h/m/s)숫자 : 패/필드 카드 상세 보기 (예: dh1, dm2)")
         print("- 7자리 단축소환 : 몬스터 일반/특수 소환 통합 실행 (예: 1134441, 1231211)")
         print("- 8자리 마법장착 : 패의 고치 장착/지속마법 발동 통합 실행 (예: 03011010)")
@@ -558,8 +740,26 @@ def main_phase1():
         
         if cmd == "e": break
         
+        # 숫자 기반 진화의 고치 장착 처리
+        if cmd.isdigit() and len(cmd) >= 3 and cmd[0] == '3':
+            process_cocoon_equip_numeric(cmd)
+            continue
+
+        # 숫자 기반 반전소환 처리
+        if cmd.isdigit() and len(cmd) >= 2 and cmd[0] == '2':
+            process_reverse_summon_numeric(cmd)
+            continue
+
+        # 숫자 기반 마법/함정 명령 처리
+        if cmd.isdigit() and len(cmd) >= 3 and len(cmd) < 7 and cmd[0] in {'0', '1'}:
+            process_magic_trap_numeric(cmd)
+            continue
+        
         # 🆕 통합 단축코드 감지 (숫자이고 길이가 7 이상일 때 작동)
         if cmd.isdigit() and len(cmd) >= 7:
+            if cmd[0] == '0':
+                process_magic_trap_numeric(cmd)
+                continue
             process_shortcut_unified(cmd)
             continue
         
@@ -596,10 +796,6 @@ def main_phase1():
         # 개별 마함 제어 분기
         if cmd.startswith("m") and cmd[1:].isdigit():
             play_magic_trap(int(cmd[1:]) - 1)
-            continue
-        # 개별 장착 고치 연동 분기
-        if cmd.startswith("g") and cmd[1:].isdigit():
-            equip_cocoon(int(cmd[1:]) - 1)
             continue
         # 개별 진화 룰 특소 분기
         if cmd.startswith("s") and cmd[1:].isdigit():
